@@ -1,6 +1,6 @@
 ## Welcome to your Kubernetes training. Building a cluster from scratch is a foundational exercise for any infrastructure engineer. It strips away the magic of managed services (like EKS or GKE) and shows you exactly how the control plane and worker nodes interact.
 
-### For this environment, we will use a RHEL-based operating system (such as RHEL 9, Rocky Linux 9, or AlmaLinux 9). The commands below will utilize `dnf` and `systemd` tools.
+ For this environment, we will use a RHEL-based operating system (such as RHEL 9, Rocky Linux 9, or AlmaLinux 9). The commands below will utilize `dnf` and `systemd` tools.
 
 ### Let's begin.
 
