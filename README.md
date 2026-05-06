@@ -1,283 +1,222 @@
-## Welcome to your Kubernetes training. Building a cluster from scratch is a foundational exercise for any infrastructure engineer. It strips away the magic of managed services (like EKS or GKE) and shows you exactly how the control plane and worker nodes interact.
+
+# Kubernetes Concepts Reference Guide
  
- For this environment, we will use a RHEL-based operating system (such as RHEL 9, Rocky Linux 9, or AlmaLinux 9). The commands below will utilize `dnf` and `systemd` tools.
- 
-### Let's begin.
- 
----
- 
-## VM Requirements
- 
-The following virtual machines are required to complete this training:
- 
-| VM Name          | Role          | Operating System | RAM  | CPU Cores | Notes                        |
-|---------------   |---------------|------------------|------|-----------|------------------------------|
-| k8s-master       | Master / Control Plane | CentOS 9    | 4 GB | 2 Cores   | Runs API server, etcd, scheduler, controller manager |
-| k8s-worker1      | Worker Node   | CentOS 9         | 4 GB | 2 Cores   | Runs application workloads   |
-| k8s-worker2      | Worker Node   | CentOS 9         | 4 GB | 2 Cores   | Runs application workloads   |
- 
-> **Note:** All VMs must be on the same network and able to communicate with each other by hostname and IP address.
+> A companion reference for the Kubernetes from-scratch installation guide. This page explains every major concept, component, and tool encountered during the cluster setup.
  
 ---
  
-## 1. Pre-requisites
+## Table of Contents
  
-**Target: ALL NODES** (Run these commands on Master and both Workers)
- 
-Before installing Kubernetes, we must prepare the operating system to host containers and handle Kubernetes networking safely.
- 
----
-**1.1 Set Hostnames**
- 
-Each node must have a unique hostname so the cluster can accurately identify and route traffic to it.
-```bash
-# On Master Node
-sudo hostnamectl set-hostname k8s-master
-```
-```bash
-# On Worker Node 1
-sudo hostnamectl set-hostname k8s-worker1
-```
-```bash
-# On Worker Node 2
-sudo hostnamectl set-hostname k8s-worker2
-```
----
-**1.2 Configure Host Resolution**
- 
-Kubernetes nodes need to communicate by name. We will update the `/etc/hosts` file.
-```bash
-# Open the file on all nodes
-sudo vi /etc/hosts
-```
-```bash
-# Add the following lines (replace with your actual VM IPs)
-192.168.x.x k8s-master
-192.168.x.x k8s-worker1
-192.168.x.x k8s-worker2
-```
- 
----
-**1.3 Disable Swap**
- 
-**Why**: The kubelet (the Kubernetes node agent) is designed to manage resources like CPU and memory strictly. If swap is enabled, the OS can move memory pages to disk, completely bypassing the kubelet's resource limits and causing unpredictable performance.
-```bash
-# Disable swap immediately
-sudo swapoff -a
- 
-# Make it permanent across reboots by commenting out the swap entry
-sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
-```
+1. [Core Architecture](#1-core-architecture)
+2. [Control Plane Components](#2-control-plane-components)
+3. [Worker Node Components](#3-worker-node-components)
+4. [Networking Concepts](#4-networking-concepts)
+5. [Container Runtime](#5-container-runtime)
+6. [Key Tools](#6-key-tools)
+7. [Operating System Prerequisites](#7-operating-system-prerequisites)
+8. [Kubernetes Objects](#8-kubernetes-objects)
 ---
  
-**1.4 Set SELinux to Permissive**
+## 1. Core Architecture
  
-**Why**: Kubernetes components need to access the host filesystem and network in ways that strict SELinux policies often block by default. Setting it to permissive allows containers to function while still logging policy violations.
-```bash
-# Set SELinux to permissive immediately
-sudo setenforce 0
+### What is Kubernetes?
+Kubernetes (K8s) is an open-source **container orchestration platform**. It automates the deployment, scaling, and management of containerized applications across a cluster of machines.
  
-# Make it permanent across reboots
-sudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
+### Cluster
+A Kubernetes cluster is a set of machines (nodes) that work together to run containerized workloads. Every cluster has:
+- **One or more Control Plane (Master) nodes** — the brain that makes decisions
+- **One or more Worker nodes** — the muscle that runs the actual applications
 ```
----
-**1.5 Disable Firewall (Lab Environment)**
- 
-**Why**: Kubernetes requires various ports (6443, 10250, etc.) to be open. For a learning environment, disabling firewalld prevents network troubleshooting headaches. Note: In production, you would configure specific port rules instead.
-```bash
-sudo systemctl disable --now firewalld
-``` 
----
-**1.6 Load Kernel Modules**
- 
-**Why**: Container runtimes and network plugins require specific kernel modules. overlay is needed for the container filesystem, and br_netfilter allows iptables to see bridged traffic (crucial for pod-to-pod communication).
-```bash
-cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
-overlay
-br_netfilter
-EOF
- 
-sudo modprobe overlay
-sudo modprobe br_netfilter
-```
----
-**1.7 Configure Sysctl Parameters**
- 
-**Why**: We must instruct the Linux kernel to forward IPv4 traffic and let iptables process bridge traffic.
-```bash
-cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
-net.bridge.bridge-nf-call-iptables  = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-net.ipv4.ip_forward                 = 1
-EOF
- 
-# Apply the changes without rebooting
-sudo sysctl --system
-```
----
-**1.8 Install and Configure containerd**
- 
-**Why**: Kubernetes removed Docker as a runtime (Dockershim) in v1.24. We will use containerd, the industry standard CRI (Container Runtime Interface).
-```bash
-# Add the Docker repository (which hosts containerd)
-sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
- 
-# Install containerd
-sudo dnf install -y containerd.io
- 
-# Generate the default configuration file
-sudo mkdir -p /etc/containerd
-containerd config default | sudo tee /etc/containerd/config.toml >/dev/null
- 
-# Configure the systemd cgroup driver
-# Why: Both the OS and Kubernetes use systemd to manage services. 
-# Using two different cgroup managers (like cgroupfs and systemd) causes instability.
-sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
- 
-# Enable and start containerd
-sudo systemctl enable --now containerd
-```
----
-## 2. Install Kubernetes Components
-**Target: ALL NODES**
- 
-We need three main binaries:
- 
-- `kubeadm`: The command to bootstrap the cluster.
-- `kubelet`: The component that runs on all machines and starts pods/containers.
-- `kubectl`: The command-line utility to talk to the cluster.
-**2.1 Add the Kubernetes Repository**
-```bash
-cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
-[kubernetes]
-name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.30/rpm/
-enabled=1
-gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.30/rpm/repodata/repomd.xml.key
-EOF
-```
----
-**2.2 Install the Packages**
-```bash
-# Install the binaries and disable exclusions so they can be installed
-sudo dnf install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
- 
-# Enable the kubelet service (do NOT start it yet, kubeadm will do that)
-sudo systemctl enable kubelet
-```
----
- 
-## Master Node Setup
-**Target: MASTER NODE ONLY**
- 
-We will now bootstrap the control plane. This process generates certificates, sets up the API server, etcd (the database), scheduler, and controller manager.
- 
-**3.1 Initialize the Cluster**
-```bash
-sudo kubeadm init --pod-network-cidr=192.168.0.0/16
-```
-- `--pod-network-cidr`: This tells the cluster what block of IP addresses to assign to your Pods. We use `192.168.0.0/16` because it is the default requirement for the Calico network plugin we will install later.
-**Expected Output:**
-The screen will output a lot of text. At the very end, it will give you a `kubeadm join` command. Copy this command and save it in a notepad. You will need it for `Step 5`.
- 
----
-**3.2 Configure kubectl for your user**
- 
-Why: The kubectl command needs a configuration file (kubeconfig) to know where the API server is and how to authenticate.
-```bash
-mkdir -p $HOME/.kube
-sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
-sudo chown $(id -u):$(id -g) $HOME/.kube/config
-```
----
- 
-**3.3 Verify Control Plane**
-```bash
-kubectl get nodes
+┌─────────────────────────────────────────────────────────┐
+│                     KUBERNETES CLUSTER                  │
+│                                                         │
+│   ┌──────────────────┐      ┌────────┐   ┌────────┐    │
+│   │   Control Plane  │      │ Worker │   │ Worker │    │
+│   │   (k8s-master)   │◄────►│  Node  │   │  Node  │    │
+│   │                  │      │   1    │   │   2    │    │
+│   └──────────────────┘      └────────┘   └────────┘    │
+└─────────────────────────────────────────────────────────┘
 ```
  
-- <mark>Expected result</mark>: The master node will show up, but its status will be `NotReady`. This is completely normal because we haven't installed the network plugin yet.
----
- 
-## 4. Install Pod Network (CNI)
-**Target: MASTER NODE ONLY**
- 
-Why: Kubernetes does not handle networking natively. It requires a Container Network Interface (CNI) plugin to assign IPs to pods and route traffic between them across different nodes. We will use Calico, a highly robust, BGP-based network plugin.
- 
-**4.1 Deploy Calico**
-```bash
-kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.3/manifests/calico.yaml
-```
----
- 
-**4.2 Verify Network Setup**
-```bash
-kubectl get pods -n kube-system
-kubectl get nodes
-```
- 
-- <mark>Expected result</mark>: You will see Calico pods spinning up. Within a few minutes, run `kubectl get nodes` again, and the master node status should change from `NotReady` to `Ready`.
----
- 
-## 5. Worker Node Setup
-**Target: WORKER NODES ONLY**
-We will now attach the worker nodes to the control plane.
- 
-**5.1 Join the Cluster**
- 
-Paste the kubeadm join command you saved from `Step 3.1` into both worker nodes. It will look something like this:
-```bash
-sudo kubeadm join <master-ip>:6443 --token <token> \
-        --discovery-token-ca-cert-hash sha256:<hash>
-```
-- Token: Acts as a password so the master knows this node is authorized to join.
-- Discovery Hash: Ensures the worker is talking to the genuine master node (preventing man-in-the-middle attacks).
-Note: Tokens expire after 24 hours. If you are doing this days later, run `kubeadm token create --print-join-command` on the Master node to generate a fresh command.
+### Node
+A **node** is a single physical or virtual machine in the cluster. Each node runs a container runtime (containerd) and the kubelet agent, which communicates with the control plane.
  
 ---
  
-## 6. Verification
-**Target: MASTER NODE ONLY**
+## 2. Control Plane Components
  
-Let's ensure the whole cluster is healthy.
-```bash
-kubectl get nodes
-```
-- <mark>Expected Output</mark>: You should see your master and both workers listed, and all should have a status of `Ready`.
-```bash
-kubectl get pods -n kube-system -o wide
-```
+The control plane manages the overall state of the cluster. All of the following run on the **master node**.
  
-- <mark>Expected Output</mark>: You should see CoreDNS, etcd, API server, and Calico pods running and distributed across your nodes.
+### API Server (`kube-apiserver`)
+The **central hub** of Kubernetes. Every interaction with the cluster — whether from `kubectl`, a worker node, or an internal component — goes through the API server. It:
+- Exposes the Kubernetes REST API on port `6443`
+- Validates and processes all requests
+- Acts as the gateway to the cluster's data store (etcd)
+### etcd
+A distributed **key-value store** that serves as Kubernetes' database. It stores the entire state of the cluster — every node, pod, config, and secret. If etcd is lost without a backup, the cluster's state is gone. In production, etcd is always run in a redundant, multi-node configuration.
+ 
+### Scheduler (`kube-scheduler`)
+The component responsible for **deciding which node a new Pod runs on**. It watches for unscheduled pods and assigns them to suitable nodes based on:
+- Available CPU and memory
+- Node taints and tolerations
+- Affinity and anti-affinity rules
+### Controller Manager (`kube-controller-manager`)
+A single binary that runs multiple **control loops** (controllers). Each controller watches the cluster state and works to reconcile the *actual* state with the *desired* state. Examples include:
+- **Node Controller** — notices and responds when nodes go down
+- **ReplicaSet Controller** — ensures the correct number of pod replicas are always running
+- **Deployment Controller** — manages rolling updates
 ---
  
-## 7. Test Deployment
-**Target: MASTER NODE ONLY**
+## 3. Worker Node Components
  
-Let's prove the cluster actually works by deploying an Nginx web server.
+These components run on **every worker node** and handle the actual execution of workloads.
  
-**7.1 Create a Deployment**
-```bash
-kubectl create deployment nginx-test --image=nginx:latest
-```
-- **Why**: This tells Kubernetes to download the Nginx container image and run it as a Pod.
+### kubelet
+The **primary node agent**. It runs on every node and is responsible for:
+- Registering the node with the API server
+- Receiving Pod specifications (PodSpecs) and ensuring the described containers are running and healthy
+- Reporting node and pod status back to the control plane
+> **Why swap must be disabled:** The kubelet strictly enforces memory limits. If swap is active, the OS can silently offload memory to disk, making the kubelet's resource accounting unreliable and leading to unpredictable pod behavior.
+ 
+### kube-proxy
+A network proxy that runs on each node. It maintains **network rules** that allow communication to Pods from inside or outside the cluster. It implements the Kubernetes `Service` concept at the OS level using iptables or IPVS rules.
+ 
+### Container Runtime
+The software responsible for **actually running containers** on a node. Kubernetes communicates with the runtime via the Container Runtime Interface (CRI). In this guide, we use **containerd**.
+ 
 ---
  
-**7.2 Expose the Deployment**
-```bash
-kubectl expose deployment nginx-test --port=80 --type=NodePort
-```
-- **Why**: By default, Pod IPs are only reachable inside the cluster. NodePort opens a port (between 30000-32767) on the IP address of every VM in the cluster, routing traffic to the Nginx pod.
+## 4. Networking Concepts
+ 
+### Pod Network CIDR (`192.168.0.0/16`)
+A dedicated block of private IP addresses reserved for **Pods** inside the cluster. When `kubeadm init` is called with `--pod-network-cidr=192.168.0.0/16`, it tells the cluster to hand out IPs from this range to all pods. The `/16` gives 65,536 possible addresses.
+ 
+### CNI — Container Network Interface
+Kubernetes has no built-in pod networking. Instead, it defines a standard called **CNI** that third-party plugins implement. The CNI plugin is responsible for:
+- Assigning IP addresses to Pods
+- Routing traffic between Pods on different nodes
+- Enforcing Network Policies
+### Calico
+The CNI plugin used in this guide. Calico is a production-grade networking solution that uses **BGP (Border Gateway Protocol)** to route traffic between nodes. It is widely used in enterprise environments and is the default recommended plugin for kubeadm setups.
+ 
+### CoreDNS
+The **in-cluster DNS server** deployed automatically by kubeadm. It allows Pods and Services to discover each other by name (e.g., `nginx-test.default.svc.cluster.local`) instead of by IP address, which can change.
+ 
+### NodePort
+A type of Kubernetes `Service` that exposes an application on a **static port on every node's IP address** (in the range 30000–32767). Any traffic arriving at `<NodeIP>:<NodePort>` is forwarded to the correct Pod, regardless of which node the Pod is actually running on.
+ 
+### Bridge Networking (`br_netfilter`)
+A Linux kernel module that allows `iptables` to inspect and filter traffic passing through a **network bridge**. This is essential for Kubernetes because container traffic passes through virtual bridges, and without this module, network policies and routing rules would be bypassed.
+ 
 ---
  
-**7.3 Verify and Access**
-```bash
-kubectl get svc nginx-test
-```
-Look at the output under the `PORT(S)` column. It will look like `80:31456/TCP`. The number after the colon (`31456`) is your NodePort.
+## 5. Container Runtime
  
-Now, curl that port using the IP of any of your worker VMs:
-```bash
-curl http://<worker1-ip>:31456
+### Docker vs containerd
+Kubernetes originally used Docker as its container runtime. In **v1.24**, Kubernetes removed the built-in Docker adapter (Dockershim). The ecosystem moved to **containerd**, which is actually the same runtime that Docker itself uses under the hood — just without the extra Docker layers.
+ 
+### containerd
+A lightweight, industry-standard container runtime that implements the CRI. It handles:
+- Pulling container images from registries
+- Creating and managing container lifecycles
+- Interfacing with the OS via `runc`
+### cgroup (Control Groups)
+A Linux kernel feature that **limits and isolates resource usage** (CPU, memory, disk I/O) for processes. Kubernetes uses cgroups to enforce the resource `requests` and `limits` you set on containers.
+ 
+### cgroup Driver: `systemd`
+Both `systemd` (the Linux init system) and container runtimes use cgroups. If they use **different cgroup managers**, resource accounting conflicts and instability can occur. This guide configures containerd to use `systemd` as its cgroup driver — the same as the OS — for a single, unified hierarchy.
+ 
+### Overlay Filesystem (`overlay`)
+A Linux kernel module used by container runtimes to implement the **container filesystem**. It stacks multiple filesystem layers (the base image layers + a writable container layer) into a single unified view, making containers efficient in both storage and startup time.
+ 
+---
+ 
+## 6. Key Tools
+ 
+### `kubeadm`
+The **official bootstrapping tool** for Kubernetes clusters. It handles the complex task of generating TLS certificates, configuring the API server, and joining nodes to the cluster. It is designed to get a cluster running quickly without requiring deep knowledge of each component's configuration flags.
+ 
+| Command | Purpose |
+|---|---|
+| `kubeadm init` | Bootstrap the control plane on the master node |
+| `kubeadm join` | Attach a worker node to an existing cluster |
+| `kubeadm token create` | Generate a new join token (valid 24 hrs) |
+ 
+### `kubectl`
+The **command-line interface (CLI)** for interacting with any Kubernetes cluster. It communicates with the API server using a configuration file called `kubeconfig` (located at `~/.kube/config`).
+ 
+| Command | Purpose |
+|---|---|
+| `kubectl get nodes` | List all nodes and their status |
+| `kubectl get pods -n kube-system` | List system pods in the `kube-system` namespace |
+| `kubectl create deployment` | Create a new deployment |
+| `kubectl expose deployment` | Create a Service to expose a deployment |
+| `kubectl get svc` | List all services |
+ 
+### `kubelet`
+Not typically invoked directly by users. It runs as a **systemd service** on every node and is the low-level agent that executes the instructions from the control plane.
+ 
+---
+ 
+## 7. Operating System Prerequisites
+ 
+### SELinux
+**Security-Enhanced Linux** is a mandatory access control system built into the Linux kernel. In strict (`enforcing`) mode, it can block Kubernetes components from accessing host resources they need. Setting it to `permissive` mode allows operations while still logging violations — a safe middle ground for learning environments.
+ 
+### `firewalld`
+The default firewall management daemon on RHEL-based systems. Kubernetes requires many ports to be open between nodes (e.g., `6443` for the API server, `10250` for kubelet). In a lab environment, firewalld is disabled entirely. In production, specific port rules would be configured instead.
+ 
+### Swap
+Virtual memory that uses disk space as an overflow for RAM. Kubernetes **requires swap to be disabled** because its memory management and scheduling decisions assume all memory is physical RAM. Unexpected swap usage makes container resource limits unreliable.
+ 
+### `sysctl` Parameters
+ 
+| Parameter | Purpose |
+|---|---|
+| `net.ipv4.ip_forward = 1` | Allows the Linux kernel to forward packets between network interfaces — essential for routing traffic between pods and nodes |
+| `net.bridge.bridge-nf-call-iptables = 1` | Makes iptables rules apply to traffic crossing a network bridge, enabling Kubernetes network policies to work on bridged pod traffic |
+| `net.bridge.bridge-nf-call-ip6tables = 1` | Same as above, for IPv6 traffic |
+ 
+---
+ 
+## 8. Kubernetes Objects
+ 
+### Pod
+The **smallest deployable unit** in Kubernetes. A Pod wraps one or more containers that share the same network namespace (IP address) and storage. Pods are ephemeral — they can be created, killed, and replaced at any time.
+ 
+### Deployment
+A higher-level object that **manages a set of identical Pods**. You tell the Deployment how many replicas you want (e.g., 3 Nginx pods), and the Deployment Controller continuously ensures that number is maintained — restarting pods that crash and replacing pods on failed nodes.
+ 
+```yaml
+# Conceptual example of what a Deployment represents
+Deployment: nginx-test
+  └── ReplicaSet
+        ├── Pod (nginx container)
+        ├── Pod (nginx container)
+        └── Pod (nginx container)
 ```
+ 
+### Service
+An abstraction that provides a **stable network endpoint** for a set of Pods. Because Pod IPs change constantly, a Service gives you a fixed IP or DNS name that automatically routes to healthy pods. Types include:
+- **ClusterIP** — only reachable inside the cluster (default)
+- **NodePort** — exposes on a port on every node's IP (used in this guide)
+- **LoadBalancer** — provisions a cloud load balancer (cloud environments only)
+### Namespace
+A way to **logically divide** cluster resources into isolated groups. The `kube-system` namespace, for example, contains all the core Kubernetes components (CoreDNS, etcd, API server). User workloads default to the `default` namespace.
+ 
+---
+ 
+## Quick Reference: Port Cheat Sheet
+ 
+| Port | Component | Direction |
+|------|-----------|-----------|
+| `6443` | API Server | Worker → Master |
+| `2379-2380` | etcd | Internal (Master only) |
+| `10250` | kubelet API | Master → Worker |
+| `10251` | Scheduler | Internal (Master only) |
+| `10252` | Controller Manager | Internal (Master only) |
+| `30000-32767` | NodePort Services | External → Any Node |
+ 
+---
+ 
+*This reference guide corresponds to the Kubernetes from-scratch installation using `kubeadm` v1.30 and Calico v3.27.3 on CentOS/RHEL 9.*
