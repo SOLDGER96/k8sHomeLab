@@ -10,11 +10,11 @@
  
 The following virtual machines are required to complete this training:
  
-| VM Name       | Role          | Operating System | RAM  | CPU Cores | Notes                        |
-|---------------|---------------|------------------|------|-----------|------------------------------|
-| k8s-master    | Master / Control Plane | CentOS 9    | 4 GB | 2 Cores   | Runs API server, etcd, scheduler, controller manager |
-| k8s-worker1   | Worker Node   | CentOS 9         | 4 GB | 2 Cores   | Runs application workloads   |
-| k8s-worker2   | Worker Node   | CentOS 9         | 4 GB | 2 Cores   | Runs application workloads   |
+| VM Name          | Role          | Operating System | RAM  | CPU Cores | Notes                        |
+|---------------   |---------------|------------------|------|-----------|------------------------------|
+| k8s-master       | Master / Control Plane | CentOS 9    | 4 GB | 2 Cores   | Runs API server, etcd, scheduler, controller manager |
+| k8s-worker1      | Worker Node   | CentOS 9         | 4 GB | 2 Cores   | Runs application workloads   |
+| k8s-worker2      | Worker Node   | CentOS 9         | 4 GB | 2 Cores   | Runs application workloads   |
  
 > **Note:** All VMs must be on the same network and able to communicate with each other by hostname and IP address.
  
