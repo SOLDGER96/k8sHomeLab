@@ -9,6 +9,7 @@
 **Target: ALL NODES** (Run these commands on Master and both Workers)
 
 Before installing Kubernetes, we must prepare the operating system to host containers and handle Kubernetes networking safely.
+
 ---
 **1.1 Set Hostnames**
 
